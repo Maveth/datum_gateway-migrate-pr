@@ -614,6 +614,76 @@ void datum_api_cmd_empty_thread(int tid) {
 	}
 }
 
+
+int datum_api_clients_json(struct MHD_Connection *connection) {
+	struct MHD_Response *response;
+	int i, j, ii, sz = 0, max_sz;
+	char *output = NULL;
+	T_DATUM_MINER_DATA *m = NULL;
+	int connected_clients = 0;
+	const int max_threads = global_stratum_app ? global_stratum_app->max_threads : 0;
+
+	if (!datum_api_check_admin_password_httponly(connection, datum_api_create_response_authfail_clients)) {
+		return MHD_YES;
+	}
+	for (i = 0; i < max_threads; ++i) {
+		connected_clients += global_stratum_app->datum_threads[i].connected_clients;
+	}
+	max_sz = 256 + (connected_clients * 768) + 64;
+	output = calloc(max_sz + 16, 1);
+	if (!output) return MHD_NO;
+
+	sz = snprintf(output, max_sz - 1, "{\"ok\":true,\"count\":%d,\"clients\":[", connected_clients);
+	int first = 1;
+	for (j = 0; j < max_threads; ++j) {
+		for (ii = 0; ii < global_stratum_app->max_clients_thread; ++ii) {
+			if (global_stratum_app->datum_threads[j].client_data[ii].fd > 0) {
+				m = (T_DATUM_MINER_DATA *)global_stratum_app->datum_threads[j].client_data[ii].app_client_data;
+				if (!m) continue;
+				if (!first) sz += snprintf(&output[sz], max_sz - 1 - sz, ",");
+				first = 0;
+				sz += snprintf(&output[sz], max_sz - 1 - sz,
+					"{\"tid\":%d,\"cid\":%d,\"unique_id\":%llu,\"connect_tsms\":%llu,\"username\":\"",
+					j, ii,
+					(unsigned long long)m->unique_id,
+					(unsigned long long)m->connect_tsms);
+				for (const char *up = m->last_auth_username; *up && sz < max_sz - 16; ++up) {
+					if (*up == '"' || *up == '\\') { output[sz++] = '\\'; output[sz++] = *up; }
+					else if ((unsigned char)*up >= 0x20) { output[sz++] = *up; }
+				}
+				sz += snprintf(&output[sz], max_sz - 1 - sz,
+					"\",\"rem_host\":\"%s\",\"subscribed\":%s,\"authorized\":%s}",
+					global_stratum_app->datum_threads[j].client_data[ii].rem_host,
+					m->subscribed ? "true" : "false",
+					m->authorized ? "true" : "false");
+			}
+		}
+	}
+	sz += snprintf(&output[sz], max_sz - 1 - sz, "]}");
+	response = MHD_create_response_from_buffer(sz, (void *)output, MHD_RESPMEM_MUST_FREE);
+	MHD_add_response_header(response, "Content-Type", "application/json");
+	return datum_api_submit_uncached_response(connection, MHD_HTTP_OK, response);
+}
+
+void datum_api_cmd_migrate_client(int tid, int cid, const char *host, int port) {
+	if (!global_stratum_app || tid < 0 || tid >= global_stratum_app->max_threads) return;
+	if (cid < 0 || cid >= global_stratum_app->max_clients_thread) return;
+	if (!host || !host[0] || port <= 0 || port > 65535) {
+		DLOG_WARN("migrate_client ignored: bad host/port");
+		return;
+	}
+	T_DATUM_CLIENT_DATA *c = &global_stratum_app->datum_threads[tid].client_data[cid];
+	if (c->fd <= 0) {
+		DLOG_WARN("migrate_client ignored: empty slot %d/%d", tid, cid);
+		return;
+	}
+	snprintf(c->migrate_host, sizeof(c->migrate_host), "%s", host);
+	c->migrate_port = port;
+	c->migrate_request = true;
+	global_stratum_app->datum_threads[tid].has_client_kill_request = true;
+	DLOG_WARN("API migrate_client %d/%d -> %s:%d (reconnect+kill)", tid, cid, host, port);
+}
+
 void datum_api_cmd_kill_client(int tid, int cid) {
 	if (global_stratum_app && (tid >= 0) && (tid < global_stratum_app->max_threads)) {
 		if ((cid >= 0) && (cid < global_stratum_app->max_clients_thread)) {
@@ -714,7 +784,28 @@ int datum_api_cmd(struct MHD_Connection *connection, char *post, int len) {
 								}
 								break;
 							}
-							default: break;
+						case 'm': {
+							if (!strcmp(cstr,"migrate_client")) {
+								param = json_object_get(root, "tid");
+								if (json_is_integer(param)) {
+									tid = json_integer_value(param);
+									param = json_object_get(root, "cid");
+									if (json_is_integer(param)) {
+										cid = json_integer_value(param);
+										const char *host = NULL;
+										int port = 0;
+										param = json_object_get(root, "host");
+										if (json_is_string(param)) host = json_string_value(param);
+										param = json_object_get(root, "port");
+										if (json_is_integer(param)) port = json_integer_value(param);
+										datum_api_cmd_migrate_client(tid, cid, host, port);
+									}
+								}
+								break;
+							}
+							break;
+						}
+						default: break;
 						}
 					}
 				}
@@ -1822,6 +1913,9 @@ enum MHD_Result datum_api_answer(void *cls, struct MHD_Connection *connection, c
 		case 'c': {
 			if (!strcmp(url, "/clients")) {
 				return datum_api_client_dashboard(connection);
+			}
+			if (!strcmp(url, "/clients.json")) {
+				return datum_api_clients_json(connection);
 			}
 			if (!strcmp(url, "/coinbaser")) {
 				return datum_api_coinbaser(connection);
