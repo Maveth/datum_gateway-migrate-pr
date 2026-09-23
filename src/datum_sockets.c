@@ -180,6 +180,40 @@ void *datum_threadpool_thread(void *arg) {
 			}
 		} else if (__builtin_expect(my->has_client_kill_request,0)) {
 			// the API has requested we kill a specific client
+			// Per-client migrate: show_message + client.reconnect, flush, then kill.
+			for (j = 0; j < my->app->max_clients_thread; j++) {
+				if ((my->client_data[j].fd != 0) && (my->client_data[j].migrate_request)) {
+					T_DATUM_CLIENT_DATA *mc = &my->client_data[j];
+					char msg[512];
+					char recon[640];
+					mc->migrate_request = false;
+					if (mc->migrate_host[0] && mc->migrate_port > 0) {
+						snprintf(msg, sizeof(msg),
+							"{\"id\":null,\"method\":\"client.show_message\",\"params\":[\"Migrate to %s:%d\"]}\n",
+							mc->migrate_host, mc->migrate_port);
+						datum_socket_send_string_to_client(mc, msg);
+						snprintf(recon, sizeof(recon),
+							"{\"id\":null,\"method\":\"client.reconnect\",\"params\":[\"%s\",%d,0]}\n",
+							mc->migrate_host, mc->migrate_port);
+						datum_socket_send_string_to_client(mc, recon);
+						/* Force-flush w_buffer: normal send loop runs AFTER kill closes fd. */
+						if (mc->out_buf > 0) {
+							int sent = send(mc->fd, mc->w_buffer, mc->out_buf, 0);
+							if (sent > 0) {
+								if (sent < mc->out_buf) {
+									memmove(mc->w_buffer, mc->w_buffer + sent, mc->out_buf - sent);
+								}
+								mc->out_buf -= sent;
+							} else {
+								mc->out_buf = 0;
+							}
+						}
+						DLOG_WARN("Migrate request sent for client slot %d -> %s:%d (then kill)", j, mc->migrate_host, mc->migrate_port);
+						usleep(50000);
+					}
+					mc->kill_request = true;
+				}
+			}
 			for (j = 0; j < my->app->max_clients_thread; j++) {
 				if ((my->client_data[j].fd != 0) && (my->client_data[j].kill_request)) {
 					my->client_data[j].kill_request = false;

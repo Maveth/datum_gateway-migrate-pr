@@ -138,6 +138,8 @@ There is an [example configuration file included in the doc/ directory](doc/exam
 Note that the API/web admin password is also used for preventing CSRF attacks, so it is crucial you set it to something reasonably secure (or disable the API/web interface entirely).
 
 You should review the [documentation on usernames](doc/usernames.md) next.
+
+For listing Stratum clients as JSON and moving a single client to another host:port, see [per-client Stratum migrate](doc/client_migrate.md).
 Once you have everything running, you can point miners at the Gateway.
 
 ## Docker

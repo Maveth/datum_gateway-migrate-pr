@@ -78,6 +78,11 @@ typedef struct T_DATUM_CLIENT_DATA {
 	
 	bool kill_request;
 	
+	/* Per-client migrate: set by admin API; thread sends reconnect then kill. */
+	bool migrate_request;
+	char migrate_host[256];
+	int migrate_port;
+	
 	void *app_client_data;
 	
 	int proxy_line_read;
